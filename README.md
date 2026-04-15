@@ -1,6 +1,52 @@
 # llm.c
 
+> **New in this fork:** CUDA inference with KV cache — see [inference (KV cache)](#inference-kv-cache) below.
+
 LLMs in simple, pure C/CUDA with no need for 245MB of PyTorch or 107MB of cPython. Current focus is on pretraining, in particular reproducing the [GPT-2](https://github.com/openai/gpt-2) and [GPT-3](https://arxiv.org/abs/2005.14165) miniseries, along with a parallel PyTorch reference implementation in [train_gpt2.py](train_gpt2.py). You'll recognize this file as a slightly tweaked [nanoGPT](https://github.com/karpathy/nanoGPT), an earlier project of mine. Currently, llm.c is a bit faster than PyTorch Nightly (by about 7%). In addition to the bleeding edge mainline code in [train_gpt2.cu](train_gpt2.cu), we have a simple reference CPU fp32 implementation in ~1,000 lines of clean code in one file [train_gpt2.c](train_gpt2.c). I'd like this repo to only maintain C and CUDA code. Ports to other languages or repos are very welcome, but should be done in separate repos, and I am happy to link to them below in the "notable forks" section. Developer coordination happens in the [Discussions](https://github.com/karpathy/llm.c/discussions) and on Discord, either the `#llmc` channel on the [Zero to Hero](https://discord.gg/3zy8kqD9Cp) channel, or on `#llmdotc` on [GPU MODE](https://discord.gg/gpumode) Discord.
+
+## inference (KV cache)
+
+This fork adds forward-only CUDA inference with a KV cache, so you can run a trained GPT-2 checkpoint and generate text from a prompt efficiently.
+
+**Files added:**
+- [`inference_gpt2.cu`](inference_gpt2.cu) — CUDA inference binary. Runs a full prefill over the prompt, caches K/V for every layer, then decodes one token at a time in O(T) per step instead of O(T²).
+- [`infer.py`](infer.py) — Python wrapper that tokenizes the prompt with `tiktoken` and calls the compiled binary.
+
+**Build:**
+```bash
+make inference_gpt2cu
+```
+
+**Run (via Python wrapper):**
+```bash
+# requires: pip install tiktoken
+python3 infer.py -p "Once upon a time" -g 200 -e gpt2_124M_bf16.bin
+```
+
+**Run (directly, passing pre-tokenized IDs):**
+```bash
+./inference_gpt2cu -e gpt2_124M_bf16.bin -g 200 -p "7454 2402 257 640"
+```
+
+**Options:**
+
+| flag | default | description |
+|------|---------|-------------|
+| `-e` | `gpt2_124M_bf16.bin` | model checkpoint |
+| `-g` | `256` | tokens to generate |
+| `-s` | `1337` | random seed |
+| `-p` | *(none)* | space-separated prompt token IDs |
+| `-x` | `0` | stop at `<\|endoftext\|>` token (1 = yes) |
+
+**How the KV cache works:**
+
+The transformer has two phases:
+
+1. **Prefill** — run `gpt2_forward` over the full prompt (e.g. 5 tokens) in one batched pass. After the forward pass, copy the K and V tensors for every layer into a persistent cache of shape `[L, NH, T_max, HS]`.
+
+2. **Decode** — for each new token, run a single-token forward pass. Instead of recomputing attention over all past tokens, the query `q_t` is multiplied against the cached `K[0..t-1]` and weighted against the cached `V[0..t-1]`. Only the new token's K and V are inserted into the cache. Each decode step is O(T) in memory reads rather than O(T²).
+
+This matches the standard inference optimisation used in production LLM serving.
 
 ## quick start
 
@@ -75,50 +121,6 @@ flourish against the earlocks of
 Allay
 ---
 ```
-
-## inference (KV cache)
-
-This fork adds forward-only CUDA inference with a KV cache, so you can run a trained GPT-2 checkpoint and generate text from a prompt efficiently.
-
-**Files added:**
-- [`inference_gpt2.cu`](inference_gpt2.cu) — CUDA inference binary. Runs a full prefill over the prompt, caches K/V for every layer, then decodes one token at a time in O(T) per step instead of O(T²).
-- [`infer.py`](infer.py) — Python wrapper that tokenizes the prompt with `tiktoken` and calls the compiled binary.
-
-**Build:**
-```bash
-make inference_gpt2cu
-```
-
-**Run (via Python wrapper):**
-```bash
-# requires: pip install tiktoken
-python3 infer.py -p "Once upon a time" -g 200 -e gpt2_124M_bf16.bin
-```
-
-**Run (directly, passing pre-tokenized IDs):**
-```bash
-./inference_gpt2cu -e gpt2_124M_bf16.bin -g 200 -p "7454 2402 257 640"
-```
-
-**Options:**
-
-| flag | default | description |
-|------|---------|-------------|
-| `-e` | `gpt2_124M_bf16.bin` | model checkpoint |
-| `-g` | `256` | tokens to generate |
-| `-s` | `1337` | random seed |
-| `-p` | *(none)* | space-separated prompt token IDs |
-| `-x` | `0` | stop at `<\|endoftext\|>` token (1 = yes) |
-
-**How the KV cache works:**
-
-The transformer has two phases:
-
-1. **Prefill** — run `gpt2_forward` over the full prompt (e.g. 5 tokens) in one batched pass. After the forward pass, copy the K and V tensors for every layer into a persistent cache of shape `[L, NH, T_max, HS]`.
-
-2. **Decode** — for each new token, run a single-token forward pass. Instead of recomputing attention over all past tokens, the query `q_t` is dot-producted against the cached `K[0..t-1]` and weighted against the cached `V[0..t-1]`. Only the new token's K and V are inserted into the cache. Each decode step is O(T) in memory reads rather than O(T²).
-
-This matches the standard inference optimisation used in production LLM serving.
 
 ## datasets
 
