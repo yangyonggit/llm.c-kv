@@ -76,6 +76,50 @@ Allay
 ---
 ```
 
+## inference (KV cache)
+
+This fork adds forward-only CUDA inference with a KV cache, so you can run a trained GPT-2 checkpoint and generate text from a prompt efficiently.
+
+**Files added:**
+- [`inference_gpt2.cu`](inference_gpt2.cu) — CUDA inference binary. Runs a full prefill over the prompt, caches K/V for every layer, then decodes one token at a time in O(T) per step instead of O(T²).
+- [`infer.py`](infer.py) — Python wrapper that tokenizes the prompt with `tiktoken` and calls the compiled binary.
+
+**Build:**
+```bash
+make inference_gpt2cu
+```
+
+**Run (via Python wrapper):**
+```bash
+# requires: pip install tiktoken
+python3 infer.py -p "Once upon a time" -g 200 -e gpt2_124M_bf16.bin
+```
+
+**Run (directly, passing pre-tokenized IDs):**
+```bash
+./inference_gpt2cu -e gpt2_124M_bf16.bin -g 200 -p "7454 2402 257 640"
+```
+
+**Options:**
+
+| flag | default | description |
+|------|---------|-------------|
+| `-e` | `gpt2_124M_bf16.bin` | model checkpoint |
+| `-g` | `256` | tokens to generate |
+| `-s` | `1337` | random seed |
+| `-p` | *(none)* | space-separated prompt token IDs |
+| `-x` | `0` | stop at `<\|endoftext\|>` token (1 = yes) |
+
+**How the KV cache works:**
+
+The transformer has two phases:
+
+1. **Prefill** — run `gpt2_forward` over the full prompt (e.g. 5 tokens) in one batched pass. After the forward pass, copy the K and V tensors for every layer into a persistent cache of shape `[L, NH, T_max, HS]`.
+
+2. **Decode** — for each new token, run a single-token forward pass. Instead of recomputing attention over all past tokens, the query `q_t` is dot-producted against the cached `K[0..t-1]` and weighted against the cached `V[0..t-1]`. Only the new token's K and V are inserted into the cache. Each decode step is O(T) in memory reads rather than O(T²).
+
+This matches the standard inference optimisation used in production LLM serving.
+
 ## datasets
 
 The data files inside `/dev/data/(dataset).py` are responsible for downloading, tokenizing and saving the tokens to .bin files, readable easily from C. So for example when you run:
